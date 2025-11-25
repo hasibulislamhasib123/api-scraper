@@ -1,6 +1,10 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Vercel/Vite এ এনভায়রনমেন্ট ভেরিয়েবল এভাবে এক্সেস করতে হয়
+// লোকাল এবং প্রোডাকশন দুই জায়গাতেই এটি কাজ করবে
+const apiKey = import.meta.env.VITE_API_KEY || ""; 
+
+const ai = new GoogleGenAI({ apiKey: apiKey });
 const modelName = "gemini-2.5-flash";
 
 // Helper for type safety
@@ -11,15 +15,13 @@ interface TransformationResult {
   reasoning: string;
 }
 
-/**
- * 1. Dropdown configuration analysis
- * Suggest the best keys to use for a dropdown (label/value).
- * Human note: I take the data's temperature, poke it with questions,
- * and recommend the friendliest keys — all served with a wink.
- */
 export const analyzeDataStructure = async (
   sampleData: any
 ): Promise<TransformationResult> => {
+  if (!apiKey) {
+    return { rootPath: "", labelKey: "", valueKey: "", reasoning: "API Key Missing! Please add VITE_API_KEY in Vercel settings." };
+  }
+
   const prompt = `
     I have a JSON response. Suggest the best keys for a Dropdown (Label/Value).
     
@@ -53,12 +55,6 @@ export const analyzeDataStructure = async (
   }
 };
 
-/**
- * 2. Chat with the data & filtering
- * Talk to your JSON like it's a coworker — ask questions, request filters.
- * If you ask to "Show" or "Filter", I can return a JS arrow-function string
- * named `filterFn` to apply to items. I promise not to spill coffee on it.
- */
 export const chatWithData = async (
   userQuery: string,
   dataSample: any
@@ -67,6 +63,10 @@ export const chatWithData = async (
   filterCode?: string; 
   suggestedConfig?: { rootPath: string; labelKey: string; valueKey: string } 
 }> => {
+  if (!apiKey) {
+    return { reply: "API Key is missing. Please configure VITE_API_KEY in Vercel." };
+  }
+
   const prompt = `
     You are a Data Assistant. The user is asking about this JSON data:
     ${JSON.stringify(dataSample).slice(0, 3000)}
@@ -110,14 +110,11 @@ export const chatWithData = async (
   }
 };
 
-/**
- * 3. API scanner (reverse engineering)
- * Scan text (code, curl, logs) for likely API endpoints — playing detective,
- * guessing HTTP methods, and returning a confidence level for each find.
- */
 export const scanForApis = async (
   inputText: string
 ): Promise<ApiDiscoveryResult[]> => {
+  if (!apiKey) return [];
+
   const prompt = `
     Analyze the following text (which could be Source Code, CURL command, or Network Logs) and extract potential API Endpoints.
     
@@ -148,7 +145,6 @@ export const scanForApis = async (
       }
     });
     
-    // Manually casting the response to match `ApiDiscoveryResult` — doing a little type gymnastics
     const data = response.text ? JSON.parse(response.text) : [];
     return data.map((item: any) => ({
       url: item.url,
@@ -162,5 +158,4 @@ export const scanForApis = async (
   }
 };
 
-// Import ApiDiscoveryResult to use inside file if needed, but it's exported from types.ts
 import { ApiDiscoveryResult } from "../types";
