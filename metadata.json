@@ -1,0 +1,5 @@
+{
+  "name": "API Scraper & Dropdown Builder",
+  "description": "A tool to fetch large datasets from public APIs, visualize them, and transform them into optimized JSON for website dropdowns using Gemini AI.",
+  "requestFramePermissions": []
+}
