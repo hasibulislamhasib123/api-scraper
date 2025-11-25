@@ -1,13 +1,12 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { UploadCloud, AlertCircle, CheckCircle2, FileJson, Server, MessageSquare, Zap } from 'lucide-react';
+import { UploadCloud, AlertCircle, CheckCircle2, FileJson, Server, MessageSquare, Zap, ShieldCheck, Globe } from 'lucide-react';
 import { ApiConfig, FetchStatus, TransformationConfig } from './types';
 import { DataViewer } from './components/DataViewer';
 import { TransformationControls } from './components/TransformationControls';
-import { analyzeDataStructure } from './services/geminiService'; // সঠিক ইম্পোর্ট পাথ
+import { analyzeDataStructure } from './services/geminiService';
 import { ChatDataAssistant } from './components/ChatDataAssistant';
 import { ApiScanner } from './components/ApiScanner';
 
-// Helper to access nested props
 const getByPath = (obj: any, path: string) => {
   if (!path) return obj;
   return path.split('.').reduce((acc, part) => acc && acc[part], obj);
@@ -25,8 +24,7 @@ const App: React.FC = () => {
   const [fetchStatus, setFetchStatus] = useState<FetchStatus>('idle');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [rawData, setRawData] = useState<any>(null);
-  
-  // Filter Logic
+  const [connectionType, setConnectionType] = useState<'direct' | 'proxy' | 'public_fallback' | null>(null);
   const [activeFilterCode, setActiveFilterCode] = useState<string>('');
   
   const [transformConfig, setTransformConfig] = useState<TransformationConfig>({
@@ -39,116 +37,143 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
 
-  // --- Handlers ---
-
   const handleFetch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setFetchStatus('loading');
     setErrorMsg('');
     setRawData(null);
     setAiAnalysisReason('');
-    setActiveFilterCode(''); // Reset filters
+    setActiveFilterCode('');
+    setConnectionType(null);
 
-    try {
-      const headers = JSON.parse(apiConfig.headers || '{}');
-      const response = await fetch(apiConfig.url, {
-        method: apiConfig.method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...headers
+    // 1. Try Direct Fetch
+    const tryDirect = async () => {
+      try {
+        const response = await fetch(apiConfig.url, {
+          method: apiConfig.method,
+          headers: { 'Content-Type': 'application/json', ...JSON.parse(apiConfig.headers || '{}') }
+        });
+        if (!response.ok) throw new Error("Direct fetch failed");
+        const data = await response.json();
+        setRawData(data);
+        setConnectionType('direct');
+        return true;
+      } catch (err) { return false; }
+    };
+
+    // 2. Try Secure Proxy Fetch
+    const tryProxy = async () => {
+      try {
+        const response = await fetch('/api/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            targetUrl: apiConfig.url,
+            method: apiConfig.method,
+            headers: apiConfig.headers
+          })
+        });
+        
+        // Read error details from proxy
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.details || errData.error || response.statusText);
         }
-      });
 
-      if (!response.ok) {
-        throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
+        const data = await response.json();
+        setRawData(data);
+        setConnectionType('proxy');
+        return true;
+      } catch (err: any) { 
+        console.warn("Proxy failed:", err.message);
+        setErrorMsg(prev => prev + ` | Proxy: ${err.message}`);
+        return false; 
       }
+    };
 
-      const data = await response.json();
-      setRawData(data);
+    // 3. Try Public Fallback (AllOrigins) - if server is Geo-Blocked
+    const tryPublicFallback = async () => {
+      try {
+        // Use AllOrigins service (typically supports GET only)
+        const encodedUrl = encodeURIComponent(apiConfig.url);
+        const response = await fetch(`https://api.allorigins.win/get?url=${encodedUrl}`);
+        
+        if (!response.ok) throw new Error("Public fallback failed");
+        
+        const wrapper = await response.json();
+        const data = JSON.parse(wrapper.contents); // AllOrigins returns data as string inside contents
+        
+        setRawData(data);
+        setConnectionType('public_fallback');
+        return true;
+      } catch (err: any) {
+        console.warn("Public fallback failed:", err);
+        return false;
+      }
+    };
+
+    // Execution flow: try each method in sequence
+    const directSuccess = await tryDirect();
+    if (directSuccess) {
       setFetchStatus('success');
-      
-      // Auto analyze on first fetch
-      handleAutoAnalyze(data);
-
-    } catch (err: any) {
-      console.error(err);
-      setFetchStatus('error');
-      let msg = err.message;
-      if (err.name === 'TypeError' && msg === 'Failed to fetch') {
-        msg = 'CORS Error or Network Failure. Try using a CORS proxy or disable security in local dev.';
-      }
-      setErrorMsg(msg);
+      handleAutoAnalyze();
+      return;
     }
+
+    console.log("Direct failed, trying Secure Proxy...");
+    const proxySuccess = await tryProxy();
+    if (proxySuccess) {
+      setFetchStatus('success');
+      handleAutoAnalyze();
+      return;
+    }
+
+    console.log("Proxy failed, trying Public Fallback...");
+    const fallbackSuccess = await tryPublicFallback();
+    if (fallbackSuccess) {
+      setFetchStatus('success');
+      handleAutoAnalyze();
+      return;
+    }
+
+    // If all methods fail
+    setFetchStatus('error');
+    if (!errorMsg) setErrorMsg("Failed to connect via Direct, Proxy, and Public Relay. The API might be offline or strictly blocking foreign IPs.");
   };
 
   const handleAutoAnalyze = async (dataToAnalyze = rawData) => {
-    if (!dataToAnalyze) return;
-    setIsAnalyzing(true);
-    try {
-      const analysis = await analyzeDataStructure(dataToAnalyze);
-      setTransformConfig({
-        rootPath: analysis.rootPath,
-        labelKey: analysis.labelKey,
-        valueKey: analysis.valueKey
-      });
-      setAiAnalysisReason(analysis.reasoning);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsAnalyzing(false);
-    }
+    // Manual trigger is safer to avoid state update timing issues
+    // User can click AI Auto-Detect button to trigger analysis
   };
 
+  // Handler for API Scanner selection
   const handleUseApiFromScanner = (url: string, method: string) => {
     setApiConfig(prev => ({ ...prev, url, method: method as 'GET'|'POST' }));
     setActiveTab('fetcher');
   };
 
-  // --- Derived Data (Filtering) ---
-
   const processedData = useMemo(() => {
     if (!rawData) return null;
-    
-    // 1. Get Array from Root Path
     const list = getByPath(rawData, transformConfig.rootPath);
-    
-    // 2. Apply Filter if exists
     if (activeFilterCode && Array.isArray(list)) {
       try {
-        const filterFn = new Function('item', `return ${activeFilterCode.startsWith('item') ? activeFilterCode.replace(/^item\s*=>\s*/, '') : activeFilterCode}`);
-        // Simple check to see if we can execute it
-        const filteredList = list.filter((item) => {
-             // For strict safety we could use more checks, but for this tool dynamic eval is the feature.
-             // We reconstruct the function properly:
-             const dynamicFilter = new Function('item', 'return ' + activeFilterCode.split('=>')[1]);
-             return dynamicFilter(item);
-        });
-        
-        // Return a new object with the filtered list at the "data" key (virtual)
-        // Or if rootPath is empty, return the list directly
+        const filterFn = new Function('item', 'return ' + activeFilterCode.split('=>')[1]);
+        const filteredList = list.filter((item: any) => filterFn(item));
         if (!transformConfig.rootPath) return filteredList;
-        return { ...rawData, [transformConfig.rootPath]: filteredList }; 
-
+        return { ...rawData, [transformConfig.rootPath]: filteredList };
       } catch (e) {
-        console.error("Filter failed", e);
-        // If filter fails, return original
         return rawData;
       }
     }
-    
     return rawData;
   }, [rawData, transformConfig.rootPath, activeFilterCode]);
 
-  // Adjust root path for the viewer if we filtered
-  // If we filtered, we assume the list is now accessible via the same root path in our virtual object
   const effectiveRootPath = transformConfig.rootPath;
 
   const downloadJson = useCallback(() => {
     if (!processedData) return;
-
     let finalData;
     const list = getByPath(processedData, effectiveRootPath);
-
     if (transformConfig.labelKey && transformConfig.valueKey && Array.isArray(list)) {
       finalData = list.map((item: any) => ({
         label: item[transformConfig.labelKey],
@@ -157,7 +182,6 @@ const App: React.FC = () => {
     } else {
       finalData = list || processedData;
     }
-
     const blob = new Blob([JSON.stringify(finalData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -168,7 +192,6 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   }, [processedData, transformConfig, effectiveRootPath]);
 
-  // Compute available keys
   const availableKeys = React.useMemo(() => {
     if (!processedData) return [];
     const list = getByPath(processedData, effectiveRootPath);
@@ -180,7 +203,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20 font-sans">
-      {/* Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -189,37 +211,20 @@ const App: React.FC = () => {
             </div>
             <h1 className="text-xl font-bold text-slate-900 tracking-tight">API Workbench</h1>
           </div>
-          
           <nav className="flex gap-1 bg-slate-100 p-1 rounded-lg">
-            <button 
-              onClick={() => setActiveTab('fetcher')}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
-                activeTab === 'fetcher' ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              Data Fetcher
-            </button>
-            <button 
-              onClick={() => setActiveTab('scanner')}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
-                activeTab === 'scanner' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              API Scanner
-            </button>
+            <button onClick={() => setActiveTab('fetcher')} className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${activeTab === 'fetcher' ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Data Fetcher</button>
+            <button onClick={() => setActiveTab('scanner')} className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${activeTab === 'scanner' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>API Scanner</button>
           </nav>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        
         {activeTab === 'scanner' ? (
           <div className="animate-in fade-in duration-300">
-             <ApiScanner onSelectApi={handleUseApiFromScanner} />
+            <ApiScanner onSelectApi={handleUseApiFromScanner} />
           </div>
         ) : (
           <div className="animate-in fade-in duration-300 space-y-6">
-            {/* Fetcher Section */}
             <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 transition-all hover:shadow-md">
               <h2 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
                 <UploadCloud size={20} className="text-brand-500" />
@@ -253,13 +258,15 @@ const App: React.FC = () => {
                 </div>
               </form>
 
-              {/* Status Messages */}
               {fetchStatus === 'error' && (
                 <div className="mt-4 p-4 bg-red-50 text-red-700 rounded-lg border border-red-200 flex gap-3 text-sm animate-in slide-in-from-top-2">
                   <AlertCircle className="shrink-0 mt-0.5" size={16} />
-                  <div>
+                  <div className="flex-1">
                     <p className="font-semibold">Fetch Failed</p>
-                    <p>{errorMsg}</p>
+                    <p className="break-all">{errorMsg}</p>
+                    {errorMsg.includes("Proxy") && (
+                      <p className="mt-2 text-xs text-red-600 font-medium">Tip: The target server might be blocking Vercel IPs (Geo-blocking).</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -269,6 +276,16 @@ const App: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <CheckCircle2 size={16} />
                     <p>Success! Data loaded.</p>
+                    {connectionType === 'proxy' && (
+                      <span className="flex items-center gap-1 text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-medium">
+                        <ShieldCheck size={12}/> Secure Proxy
+                      </span>
+                    )}
+                    {connectionType === 'public_fallback' && (
+                      <span className="flex items-center gap-1 text-xs bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full font-medium">
+                        <Globe size={12}/> Public Relay
+                      </span>
+                    )}
                   </div>
                   {!isChatOpen && (
                     <button 
@@ -284,8 +301,6 @@ const App: React.FC = () => {
 
             {rawData && (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 relative">
-                
-                {/* Left Col: Transformer (4 cols) */}
                 <div className="lg:col-span-4 space-y-6">
                   <TransformationControls 
                     config={transformConfig}
@@ -321,7 +336,6 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Right Col: Viewer (8 cols) */}
                 <div className="lg:col-span-8">
                   <DataViewer data={processedData} rootPath={effectiveRootPath} />
                 </div>
@@ -331,7 +345,6 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Floating Chat Assistant */}
       <ChatDataAssistant 
         isOpen={isChatOpen && !!rawData}
         onClose={() => setIsChatOpen(false)}
